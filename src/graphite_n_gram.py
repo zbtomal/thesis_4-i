@@ -9,70 +9,68 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.ensemble import VotingClassifier, RandomForestClassifier 
 from xgboost import XGBClassifier                            
 from lightgbm import LGBMClassifier
+from imblearn.over_sampling import SMOTE  # For Augmentation
 
 class Graphite_Ngram:
-   r""" An implementation of Graphite N-gram (Aggressive Accuracy Mode). """
+   r""" An implementation of Graphite N-gram (Optimized with Optuna). """
 
    def __init__(self, 
                 N : int = 4, 
                 pool : str = "sum",
-                n_estimators : int = 1500, # গাছ আরো বাড়ানো হলো
-                learning_rate : float = 0.02): # আরো ধীরে শিখবে যাতে নিখুঁত হয়
+                n_estimators : int = 1500, 
+                learning_rate : float = 0.02): 
       
       self.N = N
       pool_choices = {"sum": torch.sum, "mean": torch.mean, "max": torch.max}
       self.pool = pool_choices[ pool ]
       
       # --- AGGRESSIVE FEATURE EXTRACTION ---
-      # min_df=1: একদম rare ইভেন্টও ধরবে
-      # max_features=15000: অনেক বেশি ডিটেইলস দেখবে
       self.count_vectorizer = TfidfVectorizer( 
                                                ngram_range = (1, 5), 
                                                max_df = 0.95,        
-                                               min_df = 1,           # Changed from 2 to 1
-                                               max_features = 15000, # Doubled features
+                                               min_df = 1,           
+                                               max_features = 15000, 
                                                sublinear_tf=True     
                                              )
 
-      # --- Level 1: The Models (Tuned for Max Accuracy) ---
+      # --- Level 1: The Models (Optimized with Trial 0 Params) ---
       
-      # 1. XGBoost
+      # 1. XGBoost (Updated)
       clf_xgb = XGBClassifier(
-         n_estimators= n_estimators,
-         learning_rate= learning_rate, 
-         max_depth= 8,           # Depth increased
-         subsample= 0.7,
+         n_estimators= 1176,          # Optuna Trial 0
+         learning_rate= 0.0125,       # Optuna Trial 0
+         max_depth= 7,                # Optuna Trial 0
+         subsample= 0.73,             # Optuna Trial 0
          colsample_bytree= 0.7,
          objective= 'binary:logistic',
          n_jobs= -1, 
-         random_state= 2024,     # New Random Seed
+         random_state= 2024,     
          eval_metric='logloss',
          verbosity=0
       )
 
-      # 2. LightGBM
+      # 2. LightGBM (Updated)
       clf_lgbm = LGBMClassifier(
-         n_estimators= n_estimators,
-         learning_rate= learning_rate,
-         num_leaves= 50,         # Increased leaves
+         n_estimators= 1824,          # Optuna Trial 0
+         learning_rate= 0.0529,       # Optuna Trial 0
+         num_leaves= 21,              # Optuna Trial 0
          max_depth= -1,
          subsample= 0.7,
          colsample_bytree= 0.7,
          n_jobs= -1, 
-         random_state= 2024,     # New Random Seed
+         random_state= 2024,     
          verbose= -1
       )
 
-      # 3. Random Forest 
+      # 3. Random Forest (Updated)
       clf_rf = RandomForestClassifier(
-          n_estimators=800,      # More trees
-          max_depth=30,          # Deeper trees
+          n_estimators= 1441,         # Optuna Trial 0
+          max_depth= 33,              # Optuna Trial 0
           n_jobs=-1, 
-          random_state=2024      # New Random Seed
+          random_state=2024      
       )
 
-      # --- Level 2: Voting with Weights ---
-      # XGBoost এবং LightGBM কে একটু বেশি পাওয়ার দেওয়া হলো (1.5 গুণ)
+      # --- Level 2: Voting with Weights (Updated) ---
       self.base_model = VotingClassifier(
           estimators=[
               ('xgb', clf_xgb), 
@@ -80,7 +78,7 @@ class Graphite_Ngram:
               ('rf', clf_rf)
           ],
           voting='soft',
-          weights=[1.5, 1.5, 1], # Weights added!
+          weights=[2.57, 2.18, 1.33], # Optuna Trial 0 Weights
           n_jobs=1 
       )
       
@@ -107,7 +105,6 @@ class Graphite_Ngram:
 
 
    def _get_thread_neighboring_nodetypes(self, data : Data, thread_node_idx : int ) -> torch.tensor:
-      # Interaction Frequency Logic
       edge_src_node_indices = data.edge_index[0]
       edge_tar_node_indices = data.edge_index[1]
       outgoing_edges_from_thread = torch.nonzero( edge_src_node_indices == thread_node_idx ).flatten()
@@ -199,9 +196,21 @@ class Graphite_Ngram:
       X = list( train_data_dict.values() )
       y = [ 1 if "malware" in data_name.lower() else 0 for data_name in train_data_dict.keys() ]
       
-      print("Fitting Weighted Ensemble (XGB + LGBM + RF)...", flush=True)
+      # --- SMOTE Augmentation Logic ---
+      print(f"Original Dataset Size: {len(y)} | Malware: {sum(y)}", flush=True)
+      print("Applying SMOTE Augmentation...", flush=True)
       
-      self.base_model.fit(X = np.array(X), y = np.array(y))
+      try:
+          smote = SMOTE(random_state=42)
+          X_resampled, y_resampled = smote.fit_resample(np.array(X), np.array(y))
+          print(f"Augmented Dataset Size: {len(y_resampled)} | Malware: {sum(y_resampled)}", flush=True)
+      except Exception as e:
+          print(f"SMOTE Failed (likely due to small data), using original. Error: {e}")
+          X_resampled, y_resampled = np.array(X), np.array(y)
+      
+      print("Fitting Weighted Ensemble (XGB + LGBM + RF) on Augmented Data...", flush=True)
+      
+      self.base_model.fit(X = X_resampled, y = y_resampled)
       
       print(f"DONE! Models fitted.", flush = True)
       return   
@@ -210,3 +219,9 @@ class Graphite_Ngram:
       test_data_graph_embedding = self.generate_graph_embedding( test_data )
       embedding_list = test_data_graph_embedding.tolist()
       return self.base_model.predict( [embedding_list] ).item()
+
+   def get_feature_names(self):
+       # Combine neighbor node types + N-gram features
+       ngram_features = self.count_vectorizer.get_feature_names_out().tolist()
+       all_features = self.nodetype_nodefeats + ngram_features
+       return all_features
